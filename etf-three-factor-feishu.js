@@ -1,33 +1,12 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const WORKSPACE = path.resolve(process.env.ETF_WORKSPACE || path.join(__dirname, "workspace"));
-const HTML_OUT = path.join(WORKSPACE, "ETF三因子分析-v7.html");
-const PDF_OUT = path.join(WORKSPACE, "ETF三因子分析-v7.pdf");
-const JSON_OUT = path.join(WORKSPACE, "ETF三因子分析-v7.json");
 const SHARES_OUT = path.join(WORKSPACE, "etf_shares_history.json");
-const HISTORY_OUT = path.join(WORKSPACE, "etf_history.jsonl");
-
-const CJK_FONT_CANDIDATES = [
-  process.env.ETF_CJK_FONT_FILE,
-  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-  "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-  "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-  "/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf",
-  "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-  "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-  "/usr/share/fonts/truetype/arphic/uming.ttc",
-  "/usr/share/fonts/truetype/arphic/ukai.ttc",
-  "/System/Library/Fonts/PingFang.ttc",
-  "/System/Library/Fonts/STHeiti Light.ttc",
-  "/Library/Fonts/Arial Unicode.ttf",
-].filter(Boolean);
 
 const ETFS = {
   "510300": { n: "华泰柏瑞沪深300ETF", idx: "沪深300" },
@@ -419,355 +398,72 @@ function analyzeAll(data, idxData, sharesByDate, days = 35) {
   return res;
 }
 
-function htmlEscape(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-function findCjkFont() {
-  for (const file of CJK_FONT_CANDIDATES) {
-    try {
-      if (fs.existsSync(file) && fs.statSync(file).isFile()) return file;
-    } catch {}
-  }
-  return null;
-}
-
-function fontMime(file) {
-  const ext = path.extname(file).toLowerCase();
-  if (ext === ".otf") return "font/otf";
-  if (ext === ".ttf") return "font/ttf";
-  if (ext === ".ttc") return "font/collection";
-  if (ext === ".woff2") return "font/woff2";
-  if (ext === ".woff") return "font/woff";
-  return "application/octet-stream";
-}
-
-function cjkFontFaceCss() {
-  const fontFile = findCjkFont();
-  if (!fontFile) return "";
-  console.log(`CJK font: ${fontFile}`);
-  const ext = path.extname(fontFile).toLowerCase();
-
-  // Chromium/PDF 对 TTC 字体的 data: URL 支持不稳定，容易生成空白 PDF。
-  // TTC 交给系统 fontconfig 通过字体族名加载；TTF/OTF/WOFF 才显式引用文件。
-  if (ext === ".ttc") {
-    return `
-@font-face{
-  font-family:"EtfCjk";
-  src:local("Noto Sans CJK SC"),local("Noto Sans CJK"),local("WenQuanYi Micro Hei"),local("PingFang SC");
-  font-weight:400 900;
-  font-style:normal;
-  font-display:block;
-}`;
-  }
-
-  const fileUrl = `file://${fontFile.replaceAll("\\", "/").replaceAll(" ", "%20")}`;
-  return `
-@font-face{
-  font-family:"EtfCjk";
-  src:url("${fileUrl}") format("${fontMime(fontFile).split("/").at(-1)}");
-  font-weight:400 900;
-  font-style:normal;
-  font-display:block;
-}`;
-}
-
-function genHtml({ actualDate, latest, signalDates, sharesData }) {
-  const rows = Object.entries(ETFS).map(([code, info]) => {
-    const p = latest[code] || {};
-    const sh = sharesData[code] || {};
-    const cp = p.cp ?? 0;
-    const level = cp >= 70 ? "high" : cp >= 50 ? "mid" : "low";
-    return `<tr class="${level}">
-      <td><b>${htmlEscape(info.n)}</b><span>${code}</span></td>
-      <td>${htmlEscape(info.idx)}</td>
-      <td class="${p.chg > 0 ? "up" : p.chg < 0 ? "down" : ""}">${fmt(p.chg, 2, true)}%</td>
-      <td>${fmt(p.v, 0)}万</td>
-      <td>${fmt(p.vr, 2)}x</td>
-      <td>${sh.shares_yi == null ? "-" : `${fmt(sh.shares_yi, 1)}亿`}</td>
-      <td>${sh.delta_yi == null ? "-" : `${fmt(sh.delta_yi, 2, true)}亿 (${fmt(sh.delta_pct, 2, true)}%)`}</td>
-      <td>${fmt(p.vp, 0)}%</td>
-      <td>${fmt(p.dp, 0)}%</td>
-      <td>${p.sp == null ? "-" : `${fmt(p.sp, 0)}%`}</td>
-      <td><strong>${fmt(cp, 0)}%</strong></td>
-    </tr>`;
-  }).join("\n");
-
-  const high = Object.values(latest).filter((x) => x.cp >= 70).length;
-  const mid = Object.values(latest).filter((x) => x.cp >= 50 && x.cp < 70).length;
-  const covered = Object.values(sharesData).filter((x) => x.shares_yi != null).length;
-  const verdict = high > 0 ? `${high} 只高确信信号` : mid > 0 ? `${mid} 只中等关注信号` : "全市场正常，未见明显同步信号";
-  const sigHtml = signalDates.length
-    ? signalDates.map((s) => `<li>${s.date}: ${s.high} 高 + ${s.mid} 中 ${s.codes?.join(", ") || ""}</li>`).join("")
-    : "<li>近 30 日无多 ETF 同步强信号</li>";
-
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ETF三因子分析 ${actualDate}</title>
-<style>
-${cjkFontFaceCss()}
-@page{size:A4 landscape;margin:10mm}
-body{margin:0;background:#f7f8fb;color:#1f2937;font:14px/1.5 "EtfCjk","Noto Sans CJK SC","Source Han Sans SC","WenQuanYi Micro Hei","PingFang SC","Microsoft YaHei",sans-serif}
-.wrap{max-width:1180px;margin:0 auto;padding:28px}
-.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:18px}
-h1{font-size:26px;margin:0}.sub{color:#64748b}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
-.card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px}.num{font-size:28px;font-weight:800}
-.ok{color:#16a34a}.warn{color:#dc2626}.midc{color:#d97706}
-table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden}
-th,td{text-align:left;padding:10px;border-bottom:1px solid #eef2f7;white-space:nowrap}th{font-size:12px;color:#64748b;background:#f8fafc}
-td span{display:block;color:#94a3b8;font-size:12px}.high{background:#fff1f2}.mid{background:#fffbeb}.low{background:#fff}
-.up{color:#dc2626}.down{color:#16a34a}strong{font-size:16px}.signals{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-top:16px}
-</style>
-</head>
-<body><main class="wrap">
-<section class="head"><div><h1>ETF三因子监测报告</h1><div class="sub">量能 50% + 方向 20% + 份额 30% · 分析日 ${actualDate}</div></div><div class="sub">生成时间 ${new Date().toLocaleString("zh-CN", { hour12: false })}</div></section>
-<section class="cards">
-<div class="card"><div class="num ${high ? "warn" : "ok"}">${high}</div><div>高确信</div></div>
-<div class="card"><div class="num ${mid ? "midc" : "ok"}">${mid}</div><div>中等关注</div></div>
-<div class="card"><div class="num">${covered}/7</div><div>份额覆盖</div></div>
-<div class="card"><div class="num">${verdict}</div><div>综合判断</div></div>
-</section>
-<table><thead><tr><th>ETF</th><th>指数</th><th>涨跌</th><th>成交量</th><th>倍量</th><th>份额</th><th>份额日变</th><th>量能P</th><th>方向P</th><th>份额P</th><th>综合</th></tr></thead><tbody>${rows}</tbody></table>
-<section class="signals"><h2>30日同步信号</h2><ul>${sigHtml}</ul></section>
-</main></body></html>`;
-}
-
 function fmt(n, digits = 1, sign = false) {
   if (n == null || Number.isNaN(Number(n))) return "-";
   const x = Number(n).toFixed(digits);
   return sign && Number(n) > 0 ? `+${x}` : x;
 }
 
-function writeHistoryLine(actualDate, latest, sharesData) {
-  const line = JSON.stringify({ run_time: new Date().toISOString(), target_date: actualDate, latest, sharesData });
-  fs.appendFileSync(HISTORY_OUT, `${line}\n`, "utf8");
-}
-
-function executableExists(bin) {
-  if (!bin) return false;
-  if (bin.includes("/") || bin.includes("\\")) return fs.existsSync(bin);
-  const paths = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
-  return paths.some((dir) => fs.existsSync(path.join(dir, bin)));
-}
-
-function unique(values) {
-  return [...new Set(values.filter(Boolean))];
-}
-
-function getChromeCandidates() {
-  return unique([
-    process.env.CHROME_BIN,
-    "chromium",
-    "chromium-browser",
-    "google-chrome",
-    "google-chrome-stable",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/snap/bin/chromium",
-    "/opt/google/chrome/chrome",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  ]);
-}
-
-async function renderPdfWithPlaywright(htmlPath, pdfPath, executablePath = null) {
-  const { chromium } = await import("playwright");
-  const launchOptions = {
-    headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
-  };
-  if (executablePath) launchOptions.executablePath = executablePath;
-  const browser = await chromium.launch(launchOptions);
-  try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
-    await page.goto(`file://${htmlPath}`, { waitUntil: "networkidle" });
-    await page.pdf({
-      path: pdfPath,
-      format: "A4",
-      landscape: true,
-      printBackground: true,
-      margin: { top: "10mm", right: "10mm", bottom: "10mm", left: "10mm" },
-    });
-  } finally {
-    await browser.close();
-  }
-}
-
-function renderPdfWithChromeCli(htmlPath, pdfPath) {
-  const errors = [];
-  for (const bin of getChromeCandidates()) {
-    if (!executableExists(bin)) {
-      errors.push(`${bin}: 不存在或不在 PATH`);
-      continue;
-    }
-    const result = spawnSync(bin, [
-      "--headless",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      `--print-to-pdf=${pdfPath}`,
-      `file://${htmlPath}`,
-    ], { encoding: "utf8" });
-    if (result.status === 0 && fs.existsSync(pdfPath) && fs.statSync(pdfPath).size > 0) return true;
-    errors.push(`${bin}: ${result.error?.message || result.stderr?.trim() || `退出码 ${result.status}`}`);
-  }
-  if (errors.length) console.warn(`系统 Chrome PDF 生成失败：${errors.join("；")}`);
-  return false;
-}
-
-function assertPdfLooksNonEmpty(pdfPath) {
-  const stat = fs.statSync(pdfPath);
-  if (stat.size < 5000) {
-    throw new Error(`PDF 文件过小，可能为空白: ${pdfPath} (${stat.size} bytes)`);
-  }
-  const head = fs.readFileSync(pdfPath).subarray(0, 4).toString("utf8");
-  if (head !== "%PDF") {
-    throw new Error(`PDF 文件头异常: ${pdfPath}`);
-  }
-}
-
-async function renderPdf(htmlPath, pdfPath) {
-  const warnings = [];
-  try {
-    await renderPdfWithPlaywright(htmlPath, pdfPath);
-    assertPdfLooksNonEmpty(pdfPath);
-    return pdfPath;
-  } catch (err) {
-    warnings.push(`Playwright bundled Chromium: ${err.message}`);
-  }
-
-  for (const bin of getChromeCandidates()) {
-    if (!executableExists(bin)) continue;
-    try {
-      await renderPdfWithPlaywright(htmlPath, pdfPath, bin);
-      assertPdfLooksNonEmpty(pdfPath);
-      return pdfPath;
-    } catch (err) {
-      warnings.push(`Playwright with ${bin}: ${err.message}`);
-    }
-  }
-
-  console.warn(`Playwright PDF 生成失败，尝试系统 Chrome: ${warnings.join("；")}`);
-  if (renderPdfWithChromeCli(htmlPath, pdfPath)) {
-    assertPdfLooksNonEmpty(pdfPath);
-    return pdfPath;
-  }
-  throw new Error([
-    "PDF 生成失败：未找到可用的 Playwright Chromium 或系统 Chrome/Chromium。",
-    "请在 NAS 上运行 `npm install && npx playwright install chromium`，",
-    "或安装 chromium/chrome 后把 CHROME_BIN 设置为真实可执行文件路径。",
-    "如果曾设置 CHROME_BIN=/usr/bin/chromium 但该文件不存在，请先取消或修正该环境变量。",
-  ].join(""));
-}
-
 function getStats() {
   const shares = loadJson(SHARES_OUT, {});
-  let lines = [];
-  try {
-    lines = fs.readFileSync(HISTORY_OUT, "utf8").trim().split("\n").filter(Boolean);
-  } catch {}
-  const last = lines.length ? JSON.parse(lines.at(-1)) : null;
   console.log("ETF JS runner status");
   console.log(`workspace: ${WORKSPACE}`);
   console.log(`shares history days: ${Object.keys(shares).length}`);
-  console.log(`run records: ${lines.length}`);
-  if (last) console.log(`last target date: ${last.target_date}`);
 }
 
-async function feishuTenantToken() {
-  const appId = process.env.FEISHU_APP_ID;
-  const appSecret = process.env.FEISHU_APP_SECRET;
-  if (!appId || !appSecret) return null;
-  const res = await fetchJson("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  });
-  if (res.code !== 0) throw new Error(`Feishu token failed: ${res.msg || res.code}`);
-  return res.tenant_access_token;
+function signalLevel(cp) {
+  if (cp >= 70) return "高确信";
+  if (cp >= 50) return "中等关注";
+  return null;
 }
 
-async function sendFeishuFile(filePath, summary) {
-  const receiveId = process.env.FEISHU_RECEIVE_ID;
-  const receiveIdType = process.env.FEISHU_RECEIVE_ID_TYPE || "chat_id";
-  const token = await feishuTenantToken();
-  if (!token || !receiveId) return false;
-
-  const bytes = fs.readFileSync(filePath);
-  const form = new FormData();
-  form.append("file_type", "stream");
-  form.append("file_name", path.basename(filePath));
-  form.append("file", new Blob([bytes], { type: "application/pdf" }), path.basename(filePath));
-  const uploadRes = await fetch("https://open.feishu.cn/open-apis/im/v1/files", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-    body: form,
-  });
-  const upload = await uploadRes.json();
-  if (upload.code !== 0) throw new Error(`Feishu upload failed: ${upload.msg || upload.code}`);
-
-  await fetchJson(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(receiveIdType)}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      receive_id: receiveId,
-      msg_type: "text",
-      content: JSON.stringify({ text: summary }),
-    }),
-  });
-
-  const msg = await fetchJson(`https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(receiveIdType)}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      receive_id: receiveId,
-      msg_type: "file",
-      content: JSON.stringify({ file_key: upload.data.file_key }),
-    }),
-  });
-  if (msg.code !== 0) throw new Error(`Feishu send file failed: ${msg.msg || msg.code}`);
-  return true;
+function formatSignalLine(code, item) {
+  const info = ETFS[code];
+  const share = item.delta_yi == null ? "" : ` 份额${fmt(item.delta_yi, 2, true)}亿/${fmt(item.delta_pct, 2, true)}%`;
+  return `${code} ${info.n} CP=${fmt(item.cp, 1)}% 涨跌${fmt(item.chg, 2, true)}% 倍量${fmt(item.vr, 2)}x${share}`;
 }
 
-async function sendFeishuWebhook(summary) {
-  const webhook = process.env.FEISHU_WEBHOOK;
-  if (!webhook) return false;
-  const body = {
-    msg_type: "text",
-    content: { text: `${summary}\n\nPDF 报告已生成：${PDF_OUT}` },
-  };
-  const res = await fetchJson(webhook, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (res.code && res.code !== 0) throw new Error(`Feishu webhook failed: ${res.msg || res.code}`);
-  return true;
+function buildBarkMessage(actualDate, latest) {
+  const entries = Object.entries(latest)
+    .filter(([, x]) => signalLevel(x.cp))
+    .sort(([, a], [, b]) => b.cp - a.cp);
+  if (!entries.length) return null;
+
+  const high = entries.filter(([, x]) => x.cp >= 70);
+  const mid = entries.filter(([, x]) => x.cp >= 50 && x.cp < 70);
+  const lines = [`ETF三因子 ${actualDate}`];
+  if (high.length) {
+    lines.push("高确信:");
+    for (const [code, item] of high) lines.push(formatSignalLine(code, item));
+  }
+  if (mid.length) {
+    lines.push("中等关注:");
+    for (const [code, item] of mid) lines.push(formatSignalLine(code, item));
+  }
+  return lines.join("\n");
 }
 
-async function maybeSendFeishu(actualDate, latest, reportPath) {
-  const high = Object.entries(latest).filter(([, x]) => x.cp >= 70).map(([c]) => c);
-  const mid = Object.entries(latest).filter(([, x]) => x.cp >= 50 && x.cp < 70).map(([c]) => c);
-  const summary = [
-    `ETF三因子分析报告 ${actualDate}`,
-    `高确信: ${high.length ? high.join(", ") : "无"}`,
-    `中等关注: ${mid.length ? mid.join(", ") : "无"}`,
-    `报告: ${path.basename(reportPath)}`,
-  ].join("\n");
+function barkEndpoint() {
+  const value = process.env.BARK;
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value.replace(/\/$/, "");
+  return `https://api.day.app/${encodeURIComponent(value)}`;
+}
 
-  if (process.env.FEISHU_APP_ID && process.env.FEISHU_APP_SECRET && process.env.FEISHU_RECEIVE_ID) {
-    await sendFeishuFile(reportPath, summary);
-    console.log("飞书 PDF 文件已发送");
+async function maybeSendBark(actualDate, latest) {
+  const endpoint = barkEndpoint();
+  if (!endpoint) {
+    console.log("未设置 BARK 环境变量，跳过 Bark 推送");
     return;
   }
-  if (process.env.FEISHU_WEBHOOK) {
-    await sendFeishuWebhook(summary);
-    console.log("飞书 webhook 摘要已发送");
+  const body = buildBarkMessage(actualDate, latest);
+  if (!body) {
+    console.log("无高确信或中等关注信号，跳过 Bark 推送");
+    return;
   }
+  const res = await fetch(`${endpoint}/${encodeURIComponent(`ETF三因子 ${actualDate}`)}/${encodeURIComponent(body)}`);
+  if (!res.ok) throw new Error(`Bark push failed: ${res.status} ${res.statusText}`);
+  console.log("Bark 文本结果已发送");
 }
 
 async function run(targetDate = null) {
@@ -801,7 +497,6 @@ async function run(targetDate = null) {
 
   const latest = {};
   const sharesData = {};
-  const dateSig = {};
   for (const [code, info] of Object.entries(ETFS)) {
     const data = await fetchKline(code, 60);
     const sharesByDate = {};
@@ -826,41 +521,10 @@ async function run(targetDate = null) {
       delta_yi: sh.delta_yi ?? null,
       delta_pct: sh.delta_pct ?? null,
     };
-    for (const h of hist) {
-      dateSig[h.d] ||= { high: 0, mid: 0, codes: [] };
-      if (h.cp >= 70) {
-        dateSig[h.d].high += 1;
-        dateSig[h.d].codes.push(`${code}(${Math.round(h.cp)}%)`);
-      } else if (h.cp >= 50) {
-        dateSig[h.d].mid += 1;
-      }
-    }
     console.log(`${code} ${info.n}: ${target.chg >= 0 ? "+" : ""}${target.chg}% CP=${target.cp}%`);
   }
 
-  const signalDates = Object.entries(dateSig)
-    .filter(([, v]) => v.high >= 2 || v.high + v.mid >= 4)
-    .sort(([a], [b]) => b.localeCompare(a))
-    .slice(0, 10)
-    .map(([date, v]) => ({ date, ...v }));
-
-  const payload = {
-    run_time: new Date().toISOString(),
-    model: "三因子: 量能50%+方向20%+份额30%",
-    target_date: actualTarget,
-    signal_dates: signalDates,
-    latest,
-    shares_data: sharesData,
-  };
-  const html = genHtml({ actualDate: actualTarget, latest, signalDates, sharesData });
-  fs.writeFileSync(HTML_OUT, html, "utf8");
-  const pdfPath = await renderPdf(HTML_OUT, PDF_OUT);
-  saveJson(JSON_OUT, payload);
-  writeHistoryLine(actualTarget, latest, sharesData);
-  console.log(`HTML: ${HTML_OUT}`);
-  console.log(`PDF: ${pdfPath}`);
-  console.log(`JSON: ${JSON_OUT}`);
-  await maybeSendFeishu(actualTarget, latest, pdfPath);
+  await maybeSendBark(actualTarget, latest);
 }
 
 const args = process.argv.slice(2);
