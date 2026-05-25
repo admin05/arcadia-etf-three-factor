@@ -427,7 +427,7 @@ function buildBarkMessage(actualDate, latest) {
   const entries = Object.entries(latest)
     .filter(([, x]) => signalLevel(x.cp))
     .sort(([, a], [, b]) => b.cp - a.cp);
-  if (!entries.length) return null;
+  if (!entries.length) return `ETF三因子 ${actualDate}\n今日无高确信或中等关注信号`;
 
   const high = entries.filter(([, x]) => x.cp >= 70);
   const mid = entries.filter(([, x]) => x.cp >= 50 && x.cp < 70);
@@ -457,10 +457,6 @@ async function maybeSendBark(actualDate, latest) {
     return;
   }
   const body = buildBarkMessage(actualDate, latest);
-  if (!body) {
-    console.log("无高确信或中等关注信号，跳过 Bark 推送");
-    return;
-  }
   const res = await fetch(`${endpoint}/${encodeURIComponent(`ETF三因子 ${actualDate}`)}/${encodeURIComponent(body)}`);
   if (!res.ok) throw new Error(`Bark push failed: ${res.status} ${res.statusText}`);
   console.log("Bark 文本结果已发送");
